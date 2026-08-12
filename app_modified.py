@@ -48,10 +48,10 @@ salesman_df, tinh_df, products_df, MONTHS = load_reference_data()
 
 def month_label(m: str) -> str:
     y, mo = m.split("-")
-    return f"{int(mo):02d}/{y}"
+    return f"{int(mo)}/{y}"
 
 MONTH_LABELS = [month_label(m) for m in MONTHS]
-QTY_COLS = [f"SL {lbl}" for lbl in MONTH_LABELS]
+QTY_COLS = MONTH_LABELS.copy()
 
 CROPS = ["Durian", "Coffee", "Rice", "Dragon fruit", "Mango", "Vegetable & others"]
 CROP_LABELS = {
@@ -139,9 +139,9 @@ def recompute_detail(df: pd.DataFrame, region: str) -> pd.DataFrame:
 
 def invalid_mask(df: pd.DataFrame):
     return (
-        (df["Khách hàng (C1)"] == "")
-        | (df["Tỉnh"] == "")
-        | (df["Sản phẩm"] == "")
+        (df["Khách hàng (C1)"].fillna("").astype(str).str.strip() == "")
+        | (df["Tỉnh"].fillna("").astype(str).str.strip() == "")
+        | (df["Sản phẩm"].fillna("").astype(str).str.strip() == "")
     )
 
 def build_overview(df: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +225,7 @@ def merge_crop_alloc(new_summary: pd.DataFrame, old_alloc: pd.DataFrame) -> pd.D
 
 def fmt_vnd(x):
     try:
-        return f"{x:,.0f}"
+        return f"{float(x):,.0f}"
     except Exception:
         return str(x)
 
@@ -234,87 +234,43 @@ def fmt_vnd(x):
 # EXPORT TO EXCEL
 # ------------------------------------------------------------------
 def export_excel(user: dict, detail_df: pd.DataFrame, overview_df: pd.DataFrame, crop_df: pd.DataFrame) -> bytes:
-    """Xuất Excel ổn định, có fallback engine và định dạng số rõ ràng."""
-    buf = io.BytesIO()
-
-    # openpyxl là lựa chọn chính; nếu môi trường thiếu thì thử xlsxwriter.
-    engine = None
-    for candidate in ("openpyxl", "xlsxwriter"):
+    """Create the Excel workbook in memory with a robust engine fallback."""
+    last_error = None
+    for engine in ("openpyxl", "xlsxwriter"):
         try:
-            __import__(candidate)
-            engine = candidate
-            break
-        except ImportError:
-            continue
-    if engine is None:
-        raise RuntimeError("Môi trường chưa cài openpyxl hoặc xlsxwriter. Hãy thêm openpyxl vào requirements.txt.")
-
-    try:
-        with pd.ExcelWriter(buf, engine=engine) as writer:
-            info_df = pd.DataFrame([{
-                "Mã NV": user["code"],
-                "Tên": user["name"],
-                "Vùng": user["region"],
-                "Ngày xuất kế hoạch": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            }])
-            info_df.to_excel(writer, sheet_name="Thông tin", index=False)
-
-            d = detail_df[~invalid_mask(detail_df)].copy()
-            d = d.drop(columns=[c for c in d.columns if c.startswith("_")], errors="ignore")
-            d.to_excel(writer, sheet_name="KH x Sản phẩm", index=False)
-
-            overview_df.reset_index().to_excel(writer, sheet_name="Tổng quan KH", index=False)
-
-            cdf = crop_df.copy()
-            if not cdf.empty and "Month" in cdf.columns:
-                cdf["Month"] = pd.to_datetime(cdf["Month"], errors="coerce")
-            out_cols = ["Tỉnh", "Short name", "Month", "Kg/L", "Target VNĐ"] + CROPS
-            cdf[out_cols].to_excel(writer, sheet_name="Cây trồng", index=False)
-
-            # Định dạng Excel.
-            if engine == "openpyxl":
-                for ws in writer.sheets.values():
-                    ws.freeze_panes = "A2"
-                    ws.auto_filter.ref = ws.dimensions
-                    for column_cells in ws.columns:
-                        max_len = max(len(str(cell.value or "")) for cell in column_cells)
-                        ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 10), 32)
-
-                for sheet_name in ("KH x Sản phẩm", "Tổng quan KH"):
-                    ws = writer.sheets[sheet_name]
-                    for row in ws.iter_rows():
-                        for cell in row:
-                            if isinstance(cell.value, (int, float)) and cell.row > 1:
-                                cell.number_format = '#,##0'
-
-                ws = writer.sheets["Cây trồng"]
-                for row in ws.iter_rows():
-                    for cell in row:
-                        if cell.column == 5 and cell.row > 1:
-                            cell.number_format = '#,##0'
-            else:
-                # XlsxWriter dùng API riêng.
-                money_fmt = writer.book.add_format({"num_format": "#,##0"})
-                for sheet_name, df_out in [
-                    ("KH x Sản phẩm", d),
-                    ("Tổng quan KH", overview_df.reset_index()),
-                    ("Cây trồng", cdf[out_cols]),
-                ]:
-                    ws = writer.sheets[sheet_name]
-                    ws.freeze_panes(1, 0)
-                    ws.autofilter(0, 0, len(df_out), max(len(df_out.columns) - 1, 0))
-                    for idx, col in enumerate(df_out.columns):
-                        width = min(max(len(str(col)) + 2, 10), 32)
-                        ws.set_column(idx, idx, width)
-                    if sheet_name in ("KH x Sản phẩm", "Tổng quan KH"):
-                        ws.set_column(0, max(len(df_out.columns) - 1, 0), None, None)
-                    if sheet_name == "Cây trồng" and "Target VNĐ" in df_out.columns:
-                        idx = list(df_out.columns).index("Target VNĐ")
-                        ws.set_column(idx, idx, 16, money_fmt)
-
-        return buf.getvalue()
-    except Exception as exc:
-        raise RuntimeError(f"Không thể tạo file Excel: {type(exc).__name__}: {exc}") from exc
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine=engine) as writer:
+                pd.DataFrame([{
+                    "Mã NV": user["code"], "Tên": user["name"], "Vùng": user["region"],
+                    "Ngày xuất kế hoạch": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                }]).to_excel(writer, sheet_name="Thông tin", index=False)
+                d = detail_df[~invalid_mask(detail_df)].copy()
+                d = d.drop(columns=[c for c in d.columns if c.startswith("_")], errors="ignore")
+                d.to_excel(writer, sheet_name="KH x Sản phẩm", index=False)
+                overview_df.reset_index().to_excel(writer, sheet_name="Tổng quan KH", index=False)
+                cdf = crop_df.copy()
+                if not cdf.empty:
+                    cdf["Month"] = pd.to_datetime(cdf["Month"])
+                cdf[["Tỉnh", "Short name", "Month", "Kg/L", "Target VNĐ"] + CROPS].to_excel(writer, sheet_name="Cây trồng", index=False)
+                if engine == "openpyxl":
+                    for ws in writer.book.worksheets:
+                        ws.freeze_panes = "A2"
+                        for row in ws.iter_rows():
+                            for cell in row:
+                                if isinstance(cell.value, (int, float)):
+                                    cell.number_format = "#,##0"
+                        for col in ws.columns:
+                            letter = col[0].column_letter
+                            width = min(max(len(str(c.value or "")) for c in col) + 2, 45)
+                            ws.column_dimensions[letter].width = width
+                else:
+                    money_fmt = writer.book.add_format({"num_format": "#,##0"})
+                    for ws in writer.sheets.values():
+                        ws.freeze_panes(1, 0); ws.set_column("A:Z", 14); ws.set_column("D:Z", 14, money_fmt)
+            return buf.getvalue()
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Không thể tạo file Excel: {last_error}")
 
 
 # ------------------------------------------------------------------
@@ -335,134 +291,79 @@ def login_screen():
             st.session_state.user = {"code": row["code"], "name": row["name"], "region": row["region"]}
             st.rerun()
     st.markdown("---")
-    st.caption("Mã ví dụ để demo: `E1234` (chỉ là mã minh họa, không phải mã nhân viên thực tế).")
+    st.caption("Ví dụ định dạng mã nhân viên: `E1234`.")
 
 
 # ------------------------------------------------------------------
 # STEP 1: DETAIL ENTRY
 # ------------------------------------------------------------------
-def customer_suggestions(df: pd.DataFrame):
-    """Các khách hàng đã nhập ở các dòng phía trên, dùng làm danh sách gợi ý."""
-    if df is None or df.empty or "Khách hàng (C1)" not in df.columns:
-        return [""]
-    vals = (
-        df["Khách hàng (C1)"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-    return [""] + list(dict.fromkeys([v for v in vals if v]))
-
-
-def commit_detail_editor():
-    """Áp dụng delta của data_editor vào DataFrame hiện tại sau mỗi lần đổi ô."""
-    try:
-        state = st.session_state.get("detail_editor", {})
-        base = st.session_state.detail_df.copy()
-        edited_rows = state.get("edited_rows", {})
-        added_rows = state.get("added_rows", [])
-        deleted_rows = state.get("deleted_rows", [])
-
-        for row_idx, changes in edited_rows.items():
-            idx = int(row_idx)
-            for col, value in changes.items():
-                if col in base.columns and idx < len(base):
-                    base.at[idx, col] = value
-
-        if deleted_rows:
-            base = base.drop(index=[int(i) for i in deleted_rows], errors="ignore").reset_index(drop=True)
-
-        for row in added_rows:
-            new_row = {col: 0 for col in base.columns}
-            for col, value in row.items():
-                if col in new_row:
-                    new_row[col] = value
-            base = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
-
-        st.session_state.detail_df = recompute_detail(
-            base.reset_index(drop=True), st.session_state.user["region"]
-        )
-    except Exception:
-        # Không làm hỏng form nếu Streamlit trả về trạng thái trung gian.
-        pass
-
 def step1_screen():
     user = st.session_state.user
     region = user["region"]
 
-    # ---- Overview panel ----
-    st.markdown("##### 📌 Tổng quan theo Khách hàng × Tháng &nbsp;·&nbsp; *tự tính từ toàn bộ bảng chi tiết*")
+    # ---- Overview panel (top, ~1/3 width) ----
+    st.markdown("##### 📌 Tổng quan theo Khách hàng × Tháng &nbsp;·&nbsp; *tự tính, không giới hạn khách hàng*")
     overview_df = build_overview(st.session_state.detail_df)
-    if overview_df.empty:
-        st.info("Chưa có khách hàng nào — nhập ở bảng chi tiết bên dưới.")
-    else:
-        styled = overview_df.style.format(fmt_vnd)
-        # Không giới hạn 1/3 màn hình; chiều cao bám theo số dòng thực tế.
-        overview_height = max(120, 38 * (len(overview_df) + 1) + 10)
-        st.dataframe(styled, height=overview_height, use_container_width=True)
+    col_ov, _spacer = st.columns([1, 2])
+    with col_ov:
+        if overview_df.empty:
+            st.info("Chưa có khách hàng nào — nhập ở bảng chi tiết bên dưới.")
+        else:
+            styled = overview_df.style.format(fmt_vnd)
+            st.dataframe(styled, height=260, use_container_width=True)
 
     st.divider()
 
     # ---- Detail editor ----
     st.markdown("##### 📝 Chi tiết: Khách hàng × Sản phẩm × Tháng")
     st.caption(
-        "Bắt buộc: **Khách hàng, Tỉnh, Sản phẩm**. Đơn giá tự lấy theo sản phẩm (vùng "
-        f"**{region}**). Số lượng nhập theo **thùng**. Khi đổi ô, dữ liệu được chốt ngay; "
-        "không cần bấm Enter."
+        "Bắt buộc: **Khách hàng, Tỉnh và Sản phẩm**. Đơn giá tự lấy theo sản phẩm (vùng "
+        f"**{region}**). Số lượng nhập theo **thùng**. Nếu khách hàng đã nhập trước đó, Tỉnh sẽ tự đồng bộ theo khách hàng."
     )
 
     product_options = [""] + sorted(region_products(region)["name"].unique().tolist())
     province_options = [""] + region_provinces(region)
-    customer_options = customer_suggestions(st.session_state.detail_df)
 
-    # Streamlit data_editor không hỗ trợ autocomplete/datalist trực tiếp cho TextColumn.
-    # Vì vậy giữ ô khách hàng là TextColumn để vẫn nhập được khách hàng mới, đồng thời
-    # có ô gợi ý phía trên để chọn nhanh khách hàng đã nhập trước đó.
-    if len(customer_options) > 1:
-        st.caption("💡 Gợi ý khách hàng đã nhập trước đó:")
-        suggestion = st.selectbox(
-            "Chọn khách hàng để tham khảo",
-            customer_options[1:],
-            index=None,
-            placeholder="Gõ vài ký tự để tìm khách hàng...",
-            label_visibility="collapsed",
-            key="customer_suggestion",
-        )
-        if suggestion:
-            st.info(f"Khách hàng đã có: **{suggestion}** — có thể copy tên này vào dòng mới; tỉnh sẽ tự đồng bộ.")
+    known_customers = sorted({
+        str(x).strip() for x in st.session_state.detail_df["Khách hàng (C1)"].tolist()
+        if str(x).strip()
+    })
+    if known_customers:
+        st.caption("💡 Khách hàng đã nhập trước đó sẽ được gợi ý trong dropdown; Tỉnh sẽ tự điền theo khách hàng.")
+    with st.expander("➕ Thêm khách hàng mới", expanded=not bool(known_customers)):
+        new_customer = st.text_input("Tên khách hàng (C1) mới", key="new_customer_input", placeholder="Ví dụ: C1 - Tên khách hàng").strip()
+        if st.button("Thêm khách hàng", key="add_customer_btn", disabled=not new_customer):
+            if new_customer not in known_customers:
+                new_row = {"Khách hàng (C1)": new_customer, "Tỉnh": "", "Sản phẩm": "", "Đơn giá": 0, **{c: 0 for c in QTY_COLS}, "Thành tiền": 0}
+                st.session_state.detail_df = pd.concat([st.session_state.detail_df, pd.DataFrame([new_row])], ignore_index=True)
+                st.session_state.pop("detail_editor", None)
+                st.rerun()
 
     column_config = {
-        "Khách hàng (C1)": st.column_config.TextColumn(
-            "Khách hàng (C1)", required=True, width="medium",
-            help="Nhập tự do. Các khách hàng đã dùng trước đó được gợi ý ở ô phía trên."
-        ),
-        "Tỉnh": st.column_config.SelectboxColumn("Tỉnh", options=province_options, required=True, width="small"),
+        "Khách hàng (C1)": st.column_config.SelectboxColumn("Khách hàng (C1)", options=[""] + known_customers, required=True, width="medium", help="Chọn khách hàng đã nhập trước đó."),
+        "Tỉnh": st.column_config.SelectboxColumn("Tỉnh", options=province_options, width="small"),
         "Sản phẩm": st.column_config.SelectboxColumn(
-            "Sản phẩm", options=product_options, required=True, width="large",
+            "Sản phẩm", options=product_options, width="large",
             help="Gõ để lọc nhanh trong danh sách sản phẩm của vùng bạn.",
         ),
-        "Đơn giá": st.column_config.NumberColumn("Đơn giá", format="%d", disabled=True),
-        "Thành tiền": st.column_config.NumberColumn("Thành tiền", format="%d", disabled=True),
+        "Đơn giá": st.column_config.NumberColumn("Đơn giá", format="%,.0f", disabled=True),
+        "Thành tiền": st.column_config.NumberColumn("Thành tiền", format="%,.0f", disabled=True),
     }
     for c in QTY_COLS:
         column_config[c] = st.column_config.NumberColumn(c, min_value=0, step=1, format="%d")
 
     display_cols = DETAIL_COLS
-    source_for_editor = st.session_state.detail_df[display_cols].copy()
     edited = st.data_editor(
-        source_for_editor,
+        st.session_state.detail_df[display_cols],
         column_config=column_config,
         num_rows="dynamic",
         use_container_width=True,
-        height=max(320, min(720, 38 * (len(source_for_editor) + 3))),
+        height=420,
         key="detail_editor",
     )
 
-    # Commit ngay khi Streamlit trả về dữ liệu sau thao tác đổi ô (không cần Enter).
-    if not edited.equals(source_for_editor):
-        st.session_state.detail_df = recompute_detail(edited, region)
-
-    recomputed = st.session_state.detail_df
+    recomputed = recompute_detail(edited, region)
+    st.session_state.detail_df = recomputed
 
     bad = invalid_mask(recomputed)
     n_bad = int(bad.sum())
@@ -474,7 +375,7 @@ def step1_screen():
     with c3:
         st.write("")
         if n_bad > 0:
-            st.warning(f"⚠ Còn {n_bad} dòng thiếu Khách hàng, Tỉnh hoặc Sản phẩm.")
+            st.warning(f"⚠ Còn {n_bad} dòng thiếu Khách hàng hoặc Sản phẩm.")
         else:
             st.success("✓ Tất cả dòng hợp lệ.")
 
@@ -491,113 +392,76 @@ def step1_screen():
 # ------------------------------------------------------------------
 def step2_screen():
     st.markdown("##### 🌾 Phân bổ tỷ lệ % theo cây trồng")
-    st.caption(
-        "Tỉnh / Sản phẩm / Tháng / Kg-L / Target VNĐ được tổng hợp tự động từ kế hoạch ở Bước 1. "
-        "**Kg/L = Số lượng (thùng) × Carton weight**. Mỗi dòng bắt buộc tổng % = 100."
-    )
-
+    st.caption("Tỉnh / Sản phẩm / Tháng / Kg-L / Target VNĐ được tổng hợp tự động từ kế hoạch ở Bước 1. **Kg/L = Số lượng (thùng) × Carton weight**. Mỗi dòng bắt buộc tổng % = 100.")
     if st.session_state.crop_df is None or st.session_state.crop_df.empty:
         st.info("Chưa có dữ liệu — quay lại Bước 1 và đảm bảo các dòng có Tỉnh và số lượng > 0.")
         if st.button("← Quay lại Bước 1"):
-            st.session_state.step = 1
-            st.rerun()
+            st.session_state.step = 1; st.rerun()
         return
-
     df = st.session_state.crop_df.copy()
-
     column_config = {
         "Tỉnh": st.column_config.TextColumn("Tỉnh", disabled=True),
         "Short name": st.column_config.TextColumn("Sản phẩm", disabled=True),
         "MonthLabel": st.column_config.TextColumn("Tháng", disabled=True),
-        "Kg/L": st.column_config.NumberColumn("Kg/L", format="%.1f", disabled=True),
-        "Target VNĐ": st.column_config.NumberColumn("Target VNĐ", format="#,##0", disabled=True),
+        "Kg/L": st.column_config.NumberColumn("Kg/L", format="%,.1f", disabled=True),
+        "Target VNĐ": st.column_config.NumberColumn("Target VNĐ", format="%,.0f", disabled=True),
         "Tổng %": st.column_config.NumberColumn("Tổng %", format="%.1f", disabled=True),
     }
     for c in CROPS:
-        column_config[c] = st.column_config.NumberColumn(
-            ("⭐ " if c == "Durian" else "☕ " if c == "Coffee" else "") + CROP_LABELS[c],
-            min_value=0, max_value=100, step=0.5, format="%.1f",
-            help="Ưu tiên nhập cột này." if c in ("Durian", "Coffee") else None,
-        )
-
+        column_config[c] = st.column_config.NumberColumn(CROP_LABELS[c], min_value=0, max_value=100, step=0.5, format="%.1f")
     show_cols = ["Tỉnh", "Short name", "MonthLabel", "Kg/L", "Target VNĐ"] + CROPS + ["Tổng %"]
-
-    # Tô nổi bật Sầu riêng + Cà phê để salesman biết hai cột cần chú ý.
-    st.markdown(
-        '<div style="padding:8px 12px;border-radius:8px;background:#fff7d6;border:1px solid #f0c36d;">'
-        '👉 <b>Ưu tiên nhập tỷ lệ vào Sầu riêng (%) và Cà phê (%)</b>. Các cây trồng khác vẫn có thể nhập khi cần.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    edited = st.data_editor(
-        df[show_cols],
-        column_config=column_config,
-        num_rows="fixed",
-        use_container_width=True,
-        # Chiều cao bám số dòng, tránh scrollbar riêng trong bảng.
-        height=max(180, 40 * (len(df) + 2)),
-        key="crop_editor",
-    )
+    edited = st.data_editor(df[show_cols], column_config=column_config, num_rows="fixed", use_container_width=True, height=min(520, max(220, 52 + len(df) * 35)), key="crop_editor")
     edited["Tổng %"] = edited[CROPS].sum(axis=1)
-
-    # merge back the hidden 'Month' (real date) column for export
-    full = edited.copy()
-    full["Month"] = df["Month"].values
+    full = edited.copy(); full["Month"] = df["Month"].values
     st.session_state.crop_df = full
-
     complete_mask = (full["Tổng %"] - 100).abs() < 1e-6
-    n_complete = int(complete_mask.sum())
-    n_total = len(full)
+    n_complete = int(complete_mask.sum()); n_total = len(full)
 
-    # Không tạo thêm bảng preview. Chỉ hiển thị trạng thái tổng % ngay dưới bảng.
-    if n_complete == n_total:
-        st.success(f"✓ Tổng tỷ lệ: tất cả {n_total} dòng đều = 100%.")
-    else:
-        st.error(f"✗ Tổng tỷ lệ: còn {n_total - n_complete}/{n_total} dòng chưa = 100%.")
-
-
-    c1, c2, c3 = st.columns([2, 3, 3])
+    # Highlight crop-entry headers and make the allocation table compact.
+    # Columns: 1 Tỉnh, 2 Sản phẩm, 3 Tháng, 4 Kg/L, 5 Target,
+    # 6-11 are the six crop columns, 12 is Tổng %.
+    st.markdown("""<style>
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(6),
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(7),
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(8),
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(9),
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(10),
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(11) {
+        background: #e8f3e8 !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stDataEditor"] [role="columnheader"]:nth-child(12) {
+        background: #eef0f2 !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stDataEditor"] [role="gridcell"] {
+        font-size: 12px !important;
+    }
+    </style>""", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([2, 2, 3])
     c1.metric("Dòng đạt 100%", f"{n_complete}/{n_total}")
-    with c2:
-        st.write("")
-        if n_complete < n_total:
-            st.warning("Còn dòng chưa đủ 100% — sửa % ở bảng trên (không cần tự cộng tay).")
-        else:
-            st.success("✓ Toàn bộ dòng đạt 100%.")
-
+    c2.metric("Tổng Target VNĐ", fmt_vnd(full["Target VNĐ"].sum()))
+    with c3:
+        if n_complete < n_total: st.warning("⚠ Còn dòng chưa đủ 100%. Tổng % phải đạt 100% để xuất Excel.")
+        else: st.success("✓ Toàn bộ dòng đạt 100%.")
+    st.caption("🟩 Các cột cây trồng là nơi salesman nhập tỷ lệ. Ô Tổng % phải đạt 100%.")
     b1, b2 = st.columns([1, 1])
     with b1:
         if st.button("← Quay lại Bước 1"):
-            st.session_state.step = 1
-            st.rerun()
+            st.session_state.step = 1; st.rerun()
     with b2:
         ready = n_total > 0 and n_complete == n_total
         if st.button("Hoàn tất kế hoạch & Xuất Excel ✓", type="primary", disabled=not ready):
             overview_df = build_overview(st.session_state.detail_df)
             try:
-                xls_bytes = export_excel(
-                    st.session_state.user,
-                    st.session_state.detail_df,
-                    overview_df,
-                    full,
-                )
-                st.session_state["export_bytes"] = xls_bytes
+                st.session_state["export_bytes"] = export_excel(st.session_state.user, st.session_state.detail_df, overview_df, full)
                 st.session_state["export_ready"] = True
-                st.rerun()
             except Exception as exc:
-                st.error(f"Không thể tạo file Excel: {exc}")
-
+                st.session_state["export_ready"] = False; st.error(f"Không thể tạo Excel: {exc}")
     if st.session_state.get("export_ready"):
         st.success("✓ Kế hoạch hợp lệ! Tải file Excel bên dưới và gửi lại cho quản lý.")
         fname = f"KeHoachBanHang_{st.session_state.user['code']}_{date.today().isoformat()}.xlsx"
-        st.download_button(
-            "⬇ Tải file Excel kế hoạch",
-            data=st.session_state["export_bytes"],
-            file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
+        st.download_button("⬇ Tải file Excel kế hoạch", data=st.session_state["export_bytes"], file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 
 # ------------------------------------------------------------------
